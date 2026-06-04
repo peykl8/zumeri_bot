@@ -1,4 +1,5 @@
 import asyncio
+import html
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -24,6 +25,32 @@ dp = Dispatcher(storage=MemoryStorage())
 class BrokerRegister(StatesGroup):
     waiting_for_name = State()
     waiting_for_phone = State()
+    editing_name = State()
+    editing_phone = State()
+
+
+FAQ_TEXT = """
+<b>Часто задаваемые вопросы</b>
+
+<b>Сколько времени занимает растаможка автомобиля?</b>
+<blockquote>Обычно процесс занимает до 30 дней с момента загрузки автомобиля в Суйфэньхэ.</blockquote>
+
+<b>Давно ли вы работаете с LEI LEI?</b>
+<blockquote>Да, мы давно сотрудничаем с LEI LEI. За это время все этапы доставки и оформления автомобилей были отработаны и успешно налажены.</blockquote>
+
+<b>Можете ли вы растаможить автомобиль, приобретённый у другого продавца?</b>
+<blockquote>Да, мы оказываем услуги по растаможке автомобилей независимо от того, у какого продавца был приобретён автомобиль.</blockquote>
+
+<b>Что входит в ваши услуги?</b>
+<blockquote>В комплекс наших услуг входит:
+• получение СБКТС;
+• оформление ПТС;
+• оформление ПТД;
+• оформление временной регистрации (прописки)</blockquote>
+
+<b>Какова вероятность дополнительной доплаты пошлины для физического лица?</b>
+<blockquote>Если заявленная стоимость автомобиля соответствует его рыночной стоимости и находится на уровне цен, указанных на Autohome, вероятность дополнительного начисления пошлины минимальна.</blockquote>
+""".strip()
 
 
 def make_topic_name(text: str) -> str | None:
@@ -58,9 +85,9 @@ def make_contacts_text(broker) -> str:
         username_text = f"@{username}" if username else "Telegram username не указан"
 
         manager_block = (
-            f"{phone}\n"
-            f"{username_text}\n"
-            f"{name} - ваш менеджер, который непосредственно вами сейчас занимается."
+            f"{html.escape(phone)}\n"
+            f"{html.escape(username_text)}\n"
+            f"{html.escape(name)} - ваш менеджер, который непосредственно вами сейчас занимается."
         )
 
     return (
@@ -86,6 +113,11 @@ async def setup_group_topics(chat_id: int, added_by_user_id: int | None = None):
         name="Контакты"
     )
 
+    faq_topic = await bot.create_forum_topic(
+        chat_id=chat_id,
+        name="Часто задаваемые вопросы"
+    )
+
     empty_topic = await bot.create_forum_topic(
         chat_id=chat_id,
         name="Пустая заявка"
@@ -106,6 +138,13 @@ async def setup_group_topics(chat_id: int, added_by_user_id: int | None = None):
         text=make_contacts_text(broker)
     )
 
+    await bot.send_message(
+        chat_id=chat_id,
+        message_thread_id=faq_topic.message_thread_id,
+        text=FAQ_TEXT,
+        parse_mode="HTML"
+    )
+
     return (
         empty_topic.message_thread_id,
         contacts_topic.message_thread_id,
@@ -118,7 +157,9 @@ async def start_handler(message: Message):
     if message.chat.type == "private":
         await message.answer(
             "Бот запущен и работает.\n\n"
-            "Чтобы зарегистрироваться как менеджер, напишите /register."
+            "Чтобы зарегистрироваться как менеджер, напишите /register.\n"
+            "Чтобы посмотреть свои данные, напишите /me.\n"
+            "Чтобы изменить данные, напишите /edit."
         )
     else:
         await message.answer("Бот запущен и работает!")
@@ -128,6 +169,44 @@ async def start_handler(message: Message):
 async def register_handler(message: Message, state: FSMContext):
     await state.set_state(BrokerRegister.waiting_for_name)
     await message.answer("Введите ваше имя:")
+
+
+@dp.message(Command("me"), F.chat.type == "private")
+async def me_handler(message: Message):
+    broker = await get_broker(message.from_user.id)
+
+    if not broker:
+        await message.answer(
+            "Вы пока не зарегистрированы как менеджер.\n\n"
+            "Для регистрации напишите /register."
+        )
+        return
+
+    telegram_id, username, name, phone = broker
+    username_text = f"@{username}" if username else "username не указан"
+
+    await message.answer(
+        "Ваши данные:\n\n"
+        f"Имя: {name}\n"
+        f"Телефон: {phone}\n"
+        f"Telegram: {username_text}\n\n"
+        "Чтобы изменить данные, напишите /edit."
+    )
+
+
+@dp.message(Command("edit"), F.chat.type == "private")
+async def edit_handler(message: Message, state: FSMContext):
+    broker = await get_broker(message.from_user.id)
+
+    if not broker:
+        await message.answer(
+            "Вы пока не зарегистрированы.\n\n"
+            "Сначала напишите /register."
+        )
+        return
+
+    await state.set_state(BrokerRegister.editing_name)
+    await message.answer("Введите новое имя:")
 
 
 @dp.message(BrokerRegister.waiting_for_name, F.chat.type == "private")
@@ -162,7 +241,6 @@ async def register_phone_handler(message: Message, state: FSMContext):
 
     data = await state.get_data()
     name = data["name"]
-
     username = message.from_user.username
 
     await save_broker(
@@ -184,6 +262,59 @@ async def register_phone_handler(message: Message, state: FSMContext):
     )
 
 
+@dp.message(BrokerRegister.editing_name, F.chat.type == "private")
+async def edit_name_handler(message: Message, state: FSMContext):
+    name = message.text.strip()
+
+    if len(name) < 2:
+        await message.answer("Имя слишком короткое. Введите имя ещё раз:")
+        return
+
+    await state.update_data(name=name)
+    await state.set_state(BrokerRegister.editing_phone)
+    await message.answer("Введите новый номер телефона:")
+
+
+@dp.message(BrokerRegister.editing_phone, F.chat.type == "private")
+async def edit_phone_handler(message: Message, state: FSMContext):
+    phone = message.text.strip()
+
+    cleaned_phone = (
+        phone
+        .replace("+", "")
+        .replace(" ", "")
+        .replace("-", "")
+        .replace("(", "")
+        .replace(")", "")
+    )
+
+    if not cleaned_phone.isdigit() or len(cleaned_phone) < 10:
+        await message.answer("Номер телефона выглядит неверно. Введите номер ещё раз:")
+        return
+
+    data = await state.get_data()
+    name = data["name"]
+    username = message.from_user.username
+
+    await save_broker(
+        telegram_id=message.from_user.id,
+        username=username,
+        name=name,
+        phone=phone
+    )
+
+    await state.clear()
+
+    username_text = f"@{username}" if username else "username не указан"
+
+    await message.answer(
+        "Данные обновлены.\n\n"
+        f"Имя: {name}\n"
+        f"Телефон: {phone}\n"
+        f"Telegram: {username_text}"
+    )
+
+
 @dp.message(Command("setup"))
 async def setup_handler(message: Message):
     try:
@@ -191,7 +322,7 @@ async def setup_handler(message: Message):
             chat_id=message.chat.id,
             added_by_user_id=message.from_user.id
         )
-        await message.answer("Готово. Созданы ветки: Контакты и Пустая заявка.")
+        await message.answer("Готово. Созданы ветки: Контакты, Часто задаваемые вопросы и Пустая заявка.")
     except Exception as e:
         await message.answer(
             "Не получилось создать ветки.\n\n"
@@ -221,7 +352,7 @@ async def bot_added_to_group(event: ChatMemberUpdated):
 
         await bot.send_message(
             chat_id=event.chat.id,
-            text="Бот подключён. Созданы ветки: Контакты и Пустая заявка."
+            text="Бот подключён. Созданы ветки: Контакты, Часто задаваемые вопросы и Пустая заявка."
         )
 
     except Exception as e:

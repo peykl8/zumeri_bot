@@ -106,13 +106,3 @@ async def get_broker(telegram_id: int):
             WHERE telegram_id = ?
         """, (telegram_id,))
         return await cursor.fetchone()
-
-
-async def get_all_brokers():
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute("""
-            SELECT telegram_id, username, name, phone
-            FROM brokers
-            ORDER BY name
-        """)
-        return await cursor.fetchall()
